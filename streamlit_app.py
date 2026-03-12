@@ -30,8 +30,9 @@ def parse_list(val):
     if pd.isna(val) or str(val).strip() == '': return []
     return [n.strip() for n in str(val).split(',') if n.strip()]
 
-# --- Helper: String Cleaner (Fixes the 1.0 vs 1 bug) ---
+# --- Helper: Deep String Cleaner ---
 def clean_str(val):
+    if pd.isna(val): return ""
     s = str(val).strip()
     if s.endswith('.0'): s = s[:-2]
     return s
@@ -57,20 +58,25 @@ CHAT_EMOJIS = [
 # --- 3. MAIN APP ---
 if check_password():
     try:
+        # 1. LOAD DATA
         df_prefs_raw = get_data("Preferences")
         df_rooms_raw = get_data("Rooms")
         df_hist = get_data("History")
         
-        df_hist_master = None
-        if not df_hist.empty and not df_rooms_raw.empty:
-            # Bulletproof string cleaning to fix merge errors and capacity lookups
-            df_hist['RoomName'] = df_hist['RoomName'].apply(clean_str)
-            df_hist['Accommodation'] = df_hist['Accommodation'].apply(clean_str)
+        # 2. GLOBAL DATA SANITIZATION (Fixes merge and capacity bugs)
+        if not df_rooms_raw.empty:
             df_rooms_raw['RoomName'] = df_rooms_raw['RoomName'].apply(clean_str)
             df_rooms_raw['Accommodation'] = df_rooms_raw['Accommodation'].apply(clean_str)
+            df_rooms_raw['Capacity'] = pd.to_numeric(df_rooms_raw['Capacity'], errors='coerce').fillna(0).astype(int)
             
+        if not df_hist.empty:
+            df_hist['RoomName'] = df_hist['RoomName'].apply(clean_str)
+            df_hist['Accommodation'] = df_hist['Accommodation'].apply(clean_str)
+            # Safe merge
             df_hist_master = pd.merge(df_hist, df_rooms_raw[['Accommodation', 'RoomName', 'Capacity']], on=['Accommodation', 'RoomName'], how='left')
-            df_hist_master['Capacity'] = pd.to_numeric(df_hist_master['Capacity'], errors='coerce').fillna(0).astype(int)
+            df_hist_master['Capacity'] = df_hist_master['Capacity'].fillna(0).astype(int)
+        else:
+            df_hist_master = None
 
         tab_solve, tab_data, tab_history = st.tabs(["🎲 Solver", "📊 Live Data", "📜 Fairness Log"])
 
@@ -209,13 +215,16 @@ if check_password():
             people = df_filtered.set_index('Name').to_dict('index')
             rooms = df_rooms_raw[df_rooms_raw['Accommodation'] == location].to_dict('records')
             
+            # --- DUPLICATE ROOM PROTECTION ---
+            room_names = [r['RoomName'] for r in rooms]
+            if len(room_names) != len(set(room_names)):
+                st.error("🚨 Duplicate Room Names detected in your Google Sheet for this Accommodation! Please make sure every room has a unique name (e.g. Room 1, Room 2).")
+                st.stop()
+            
             karma = {name: 0 for name in people.keys()}
             past_roommates = {name: set() for name in people.keys()}
             
             if not df_hist.empty:
-                df_hist['RoomName'] = df_hist['RoomName'].apply(clean_str)
-                df_hist['Accommodation'] = df_hist['Accommodation'].apply(clean_str)
-                
                 for p_name in people.keys():
                     if 'PersonName' not in df_hist.columns: continue
                     p_hist = df_hist[df_hist['PersonName'] == p_name]
@@ -259,7 +268,7 @@ if check_password():
                 def calculate_score(arrangement):
                     score = 0
                     for r in rooms:
-                        folks = arrangement[clean_str(r['RoomName'])]
+                        folks = arrangement[r['RoomName']]
                         if len(folks) == 0:
                             score -= 1000000 
                         
@@ -318,8 +327,8 @@ if check_password():
                 best_global_arr = None
 
                 for restart in range(15):
-                    current_arr = {clean_str(r['RoomName']): [] for r in rooms}
-                    avail = {clean_str(r['RoomName']): r['Capacity'] for r in rooms}
+                    current_arr = {r['RoomName']: [] for r in rooms}
+                    avail = {r['RoomName']: r['Capacity'] for r in rooms}
                     shuffled = list(names)
                     random.shuffle(shuffled)
                     for p in shuffled:
@@ -375,8 +384,8 @@ if check_password():
                 st.success(f"Best fit found! (Algorithm Score: {best_global_score})")
                 
                 for rm, folks in best_global_arr.items():
-                    q = next(r['Quality'] for r in rooms if clean_str(r['RoomName']) == rm)
-                    cap = next(r['Capacity'] for r in rooms if clean_str(r['RoomName']) == rm)
+                    q = next(r['Quality'] for r in rooms if r['RoomName'] == rm)
+                    cap = next(r['Capacity'] for r in rooms if r['RoomName'] == rm)
                     empty_beds = cap - len(folks)
                     
                     bed_str = f"🛏️ {empty_beds} Empty Bed{'s' if empty_beds > 1 else ''}" if empty_beds > 0 else "Full"
@@ -435,7 +444,7 @@ if check_password():
                 
                 h_rows = []
                 for rm, folks in best_global_arr.items():
-                    q = next(r['Quality'] for r in rooms if clean_str(r['RoomName']) == rm)
+                    q = next(r['Quality'] for r in rooms if r['RoomName'] == rm)
                     for p in folks: h_rows.append({"Accommodation": location, "PersonName": p, "RoomName": rm, "Quality": q, "Version": version})
                 
                 df_export = pd.DataFrame(h_rows)
@@ -449,9 +458,7 @@ if check_password():
                 msg_text = f"Room Solver results for {location}\n\n"
                 
                 for rm, folks in best_global_arr.items():
-                    df_rm_data = df_rooms_raw[(df_rooms_raw['Accommodation'].apply(clean_str) == clean_str(location)) & (df_rooms_raw['RoomName'].apply(clean_str) == clean_str(rm))]
-                    arr_cap = int(df_rm_data['Capacity'].iloc[0]) if not df_rm_data.empty else "?"
-                    
+                    arr_cap = next(r['Capacity'] for r in rooms if r['RoomName'] == rm)
                     emoji = random.choice(CHAT_EMOJIS)
                     msg_text += f"{emoji} {rm} {len(folks)}/{arr_cap}\n"
                     msg_text += f"{', '.join(folks)}\n\n"
