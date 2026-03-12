@@ -40,6 +40,7 @@ if check_password():
 
             version_filtered_df = df_prefs[df_prefs['VersionName'] == version]
             people = version_filtered_df.set_index('Name').to_dict('index')
+            
             rooms = df_rooms[df_rooms['Accommodation'] == location].to_dict('records')
             
             # PRE-CALCULATE HISTORY MAPS
