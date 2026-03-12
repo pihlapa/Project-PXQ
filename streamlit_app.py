@@ -39,8 +39,14 @@ if check_password():
         
         df_hist_master = None
         if not df_hist.empty and not df_rooms_raw.empty:
+            # --- THE FIX: Force matching columns to be strings to prevent merge errors ---
+            df_hist['RoomName'] = df_hist['RoomName'].astype(str).str.strip()
+            df_hist['Accommodation'] = df_hist['Accommodation'].astype(str).str.strip()
+            df_rooms_raw['RoomName'] = df_rooms_raw['RoomName'].astype(str).str.strip()
+            df_rooms_raw['Accommodation'] = df_rooms_raw['Accommodation'].astype(str).str.strip()
+            
             df_hist_master = pd.merge(df_hist, df_rooms_raw[['Accommodation', 'RoomName', 'Capacity']], on=['Accommodation', 'RoomName'], how='left')
-            df_hist_master['Capacity'] = df_hist_master['Capacity'].fillna(0).astype(int)
+            df_hist_master['Capacity'] = pd.to_numeric(df_hist_master['Capacity'], errors='coerce').fillna(0).astype(int)
 
         tab_solve, tab_data, tab_history = st.tabs(["🎲 Solver", "📊 Live Data", "📜 Fairness Log"])
 
@@ -75,7 +81,6 @@ if check_password():
                             occupants = df_acc_hist[(df_acc_hist['Version'] == rm_version) & (df_acc_hist['RoomName'] == rm_name)]['PersonName'].tolist()
                             
                             st.markdown("**People:**")
-                            # --- STATIC HAPPINESS CALCULATOR ---
                             for person in occupants:
                                 emoji = "❔"
                                 person_prefs = df_prefs_raw[(df_prefs_raw['VersionName'] == rm_version) & (df_prefs_raw['Name'] == person)]
@@ -94,7 +99,6 @@ if check_password():
                                     elif got_t2: emoji = "🙂"
                                     else: emoji = "🫠"
                                     
-                                    # Gender Check for the ⚠️ warning
                                     g_pref = str(p_data.get('GenderPref', 'none')).strip().lower()
                                     if g_pref in ['strict', 'prefer']:
                                         my_gender = str(p_data.get('Gender', '')).strip().lower()
@@ -109,7 +113,6 @@ if check_password():
                                 st.markdown(f"- {person} {emoji}")
                     st.divider()
 
-            # --- Row Data Viewer ---
             st.divider()
             st.subheader("Raw Live Data from Google Sheets")
             col1, col2 = st.columns(2)
@@ -119,7 +122,6 @@ if check_password():
             col2.dataframe(df_rooms_raw)
             st.divider()
 
-            # --- Copy Exporter to Chat (CONFIDENTIAL) ---
             st.subheader("Group Chat Messages")
             if df_hist_master is None or df_hist_master.empty:
                 st.info("Save an arrangement to see its group message.")
@@ -174,6 +176,10 @@ if check_password():
             past_roommates = {name: set() for name in people.keys()}
             
             if not df_hist.empty:
+                # Force types for safety during lookups
+                df_hist['RoomName'] = df_hist['RoomName'].astype(str).str.strip()
+                df_hist['Accommodation'] = df_hist['Accommodation'].astype(str).str.strip()
+                
                 for p_name in people.keys():
                     if 'PersonName' not in df_hist.columns: continue
                     p_hist = df_hist[df_hist['PersonName'] == p_name]
@@ -181,15 +187,15 @@ if check_password():
                         q = row.get('Quality', row.get('RoomQuality', 3)) 
                         if pd.notna(q):
                             try:
-                                q = int(q)
+                                q = int(float(q)) # Float conversion first catches numbers saved as '1.0'
                                 if q == 1: karma[p_name] += 30
                                 elif q == 2: karma[p_name] += 10
                             except: pass
                         
                         if 'Accommodation' in df_hist.columns and 'RoomName' in df_hist.columns:
                             others_hist = df_hist[
-                                (df_hist['Accommodation'] == row['Accommodation']) & 
-                                (df_hist['RoomName'] == row['RoomName']) & 
+                                (df_hist['Accommodation'] == str(row['Accommodation']).strip()) & 
+                                (df_hist['RoomName'] == str(row['RoomName']).strip()) & 
                                 (df_hist['PersonName'] != p_name)
                             ]['PersonName'].tolist()
                             past_roommates[p_name].update([str(n).strip() for n in others_hist])
@@ -217,7 +223,7 @@ if check_password():
                 def calculate_score(arrangement):
                     score = 0
                     for r in rooms:
-                        folks = arrangement[r['RoomName']]
+                        folks = arrangement[str(r['RoomName']).strip()]
                         if len(folks) == 0:
                             score -= 1000000 
                         
@@ -276,8 +282,8 @@ if check_password():
                 best_global_arr = None
 
                 for restart in range(15):
-                    current_arr = {r['RoomName']: [] for r in rooms}
-                    avail = {r['RoomName']: r['Capacity'] for r in rooms}
+                    current_arr = {str(r['RoomName']).strip(): [] for r in rooms}
+                    avail = {str(r['RoomName']).strip(): r['Capacity'] for r in rooms}
                     shuffled = list(names)
                     random.shuffle(shuffled)
                     for p in shuffled:
@@ -302,14 +308,14 @@ if check_password():
                             new_arr[r2].append(p1)
                             valid_move = True
                         elif move_type == 2 and new_arr[r1]:
-                            cap2 = next(r['Capacity'] for r in rooms if r['RoomName'] == r2)
+                            cap2 = avail[r2]
                             if len(new_arr[r2]) < cap2:
                                 p1 = random.choice(new_arr[r1])
                                 new_arr[r1].remove(p1)
                                 new_arr[r2].append(p1)
                                 valid_move = True
                         elif move_type == 3 and new_arr[r2]:
-                            cap1 = next(r['Capacity'] for r in rooms if r['RoomName'] == r1)
+                            cap1 = avail[r1]
                             if len(new_arr[r1]) < cap1:
                                 p2 = random.choice(new_arr[r2])
                                 new_arr[r2].remove(p2)
@@ -333,8 +339,9 @@ if check_password():
                 st.success(f"Best fit found! (Algorithm Score: {best_global_score})")
                 
                 for rm, folks in best_global_arr.items():
-                    q = next(r['Quality'] for r in rooms if r['RoomName'] == rm)
-                    cap = next(r['Capacity'] for r in rooms if r['RoomName'] == rm)
+                    # Look up by forced string to match the dictionary keys
+                    q = next(r['Quality'] for r in rooms if str(r['RoomName']).strip() == rm)
+                    cap = next(r['Capacity'] for r in rooms if str(r['RoomName']).strip() == rm)
                     empty_beds = cap - len(folks)
                     
                     bed_str = f"🛏️ {empty_beds} Empty Bed{'s' if empty_beds > 1 else ''}" if empty_beds > 0 else "Full"
@@ -393,7 +400,7 @@ if check_password():
                 
                 h_rows = []
                 for rm, folks in best_global_arr.items():
-                    q = next(r['Quality'] for r in rooms if r['RoomName'] == rm)
+                    q = next(r['Quality'] for r in rooms if str(r['RoomName']).strip() == rm)
                     for p in folks: h_rows.append({"Accommodation": location, "PersonName": p, "RoomName": rm, "Quality": q, "Version": version})
                 
                 df_export = pd.DataFrame(h_rows)
