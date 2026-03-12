@@ -38,7 +38,8 @@ if check_password():
             version = col1.selectbox("Social Map", df_prefs['VersionName'].unique())
             location = col2.selectbox("Location", df_rooms['Accommodation'].unique())
 
-            people = df_prefs[df_prefs['VersionName'] == version].set_index('Name').to_dict('index')
+            version_filtered_df = df_prefs[df_prefs['VersionName'] == version]
+            people = version_filtered_df.set_index('Name').to_dict('index')
             rooms = df_rooms[df_rooms['Accommodation'] == location].to_dict('records')
             
             # PRE-CALCULATE HISTORY MAPS
