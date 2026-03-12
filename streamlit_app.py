@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import random
-import requests
 
 # --- 1. SECURE DATA FETCHING ---
 def get_data(sheet_name):
@@ -13,8 +12,7 @@ def get_data(sheet_name):
 def check_password():
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
-    if st.session_state["password_correct"]:
-        return True
+    if st.session_state["password_correct"]: return True
     
     st.markdown("### 🔐 Secure Trip Access")
     pwd = st.text_input("Enter Trip Password", type="password")
@@ -22,8 +20,7 @@ def check_password():
         if pwd == st.secrets["password"]:
             st.session_state["password_correct"] = True
             st.rerun()
-        else:
-            st.error("Incorrect password")
+        else: st.error("Incorrect password")
     return False
 
 # --- 3. MAIN APP ---
@@ -33,23 +30,18 @@ if check_password():
         df_rooms = get_data("Rooms")
         df_hist = get_data("History")
         
-        tab_solve, tab_data, tab_history = st.tabs(["🎲 Solver", "📊 Current Data", "📜 History"])
-
-        with tab_data:
-            st.subheader("Live Data from Google Sheets")
-            st.write("**Social Map Versions:**", df_prefs['VersionName'].unique())
-            st.dataframe(df_prefs)
-            st.subheader("Accommodation List")
-            st.dataframe(df_rooms)
+        tab_solve, tab_data, tab_history = st.tabs(["🎲 Solver", "📊 Live Data", "📜 Fairness Log"])
 
         with tab_solve:
-            st.subheader("Generate New Arrangement")
+            st.subheader("Generate Arrangement")
+            
+            # Select Version and Location
+            v_options = df_prefs['VersionName'].unique()
+            l_options = df_rooms['Accommodation'].unique()
             
             col1, col2 = st.columns(2)
-            with col1:
-                version = st.selectbox("Select Social Version", df_prefs['VersionName'].unique())
-            with col2:
-                location = st.selectbox("Select Location", df_rooms['Accommodation'].unique())
+            version = col1.selectbox("Social Map", v_options)
+            location = col2.selectbox("Location", l_options)
 
             people = df_prefs[df_prefs['VersionName'] == version].set_index('Name').to_dict('index')
             rooms = df_rooms[df_rooms['Accommodation'] == location].to_dict('records')
@@ -61,16 +53,11 @@ if check_password():
                     if row['RoomQuality'] < 5:
                         frustration[row['PersonName']] += (10 - row['RoomQuality']) * 2
 
-            # Initialization for the state
-            if "best_arr" not in st.session_state:
-                st.session_state.best_arr = None
-
-            if st.button("🚀 Calculate Best Fit"):
+            if st.button("🚀 Run Social Tetris"):
                 names = list(people.keys())
                 best_arr, best_score = None, -float('inf')
                 
-                progress = st.progress(0)
-                for i in range(2000):
+                for i in range(2500):
                     random.shuffle(names)
                     temp_arr, idx, score = {}, 0, 0
                     for r in rooms:
@@ -80,6 +67,8 @@ if check_password():
                         for p_name in occupants:
                             p = people[p_name]
                             others = [n for n in occupants if n != p_name]
+                            
+                            # Scoring
                             s_no = str(p['StrictNo']).split(',') if pd.notna(p['StrictNo']) else []
                             if any(n.strip() in others for n in s_no): score -= 10**6
                             t1 = str(p['Tier1']).split(',') if pd.notna(p['Tier1']) else []
@@ -87,53 +76,36 @@ if check_password():
                             t2 = str(p['Tier2']).split(',') if pd.notna(p['Tier2']) else []
                             for n in others:
                                 if n.strip() in t2: score += 30
+                            
                             score += (r['Quality'] * 10) + (frustration[p_name] * 1.5)
                     
                     if score > best_score:
                         best_score, best_arr = score, temp_arr
-                    if i % 200 == 0: progress.progress(i / 2000)
-                
-                progress.empty()
-                st.session_state.best_arr = best_arr
-                st.session_state.last_score = best_score
 
-            # Display Results and Save Button
-            if st.session_state.best_arr:
-                st.success(f"Optimized Layout Found! Score: {st.session_state.last_score}")
-                for rm, folks in st.session_state.best_arr.items():
+                st.success(f"Best fit found (Score: {best_score})")
+                
+                # DISPLAY ROOMS
+                for rm, folks in best_arr.items():
                     with st.expander(f"🏠 {rm}", expanded=True):
                         st.write(", ".join(folks))
                 
-                # PREPARE HISTORY DATA
-                history_payload = []
-                for rm, folks in st.session_state.best_arr.items():
-                    # Find quality for this room
+                # MANUAL ENTRY ASSISTANT
+                st.divider()
+                st.write("### 📝 Copy this to Google Sheets 'History' tab:")
+                history_rows = []
+                for rm, folks in best_arr.items():
                     q = next(r['Quality'] for r in rooms if r['RoomName'] == rm)
-                    for p_name in folks:
-                        history_payload.append({
-                            "Accommodation": location,
-                            "PersonName": p_name,
-                            "RoomName": rm,
-                            "RoomQuality": q,
-                            "PrefListUsed": version
-                        })
-
-                if st.button("✅ Lock & Save to History"):
-                    try:
-                        # Send to Google Apps Script
-                        resp = requests.post(st.secrets["script_url"], json=history_payload)
-                        if resp.status_code == 200:
-                            st.success("🎉 Successfully saved to Google Sheets!")
-                            st.balloons()
-                        else:
-                            st.error(f"Failed to save. Status: {resp.status_code}")
-                    except Exception as e:
-                        st.error(f"Error connecting to Script: {e}")
+                    for p in folks:
+                        history_rows.append([location, p, rm, q, version])
+                
+                # Show as a table you can easily read from your phone
+                st.table(pd.DataFrame(history_rows, columns=["Accommodation", "PersonName", "RoomName", "Quality", "Version"]))
 
         with tab_history:
-            st.subheader("Trip History & Fairness")
+            st.subheader("Fairness Ledger")
+            st.write("Higher bars = these people deserve the best rooms next time!")
             st.bar_chart(pd.Series(frustration))
             st.dataframe(df_hist)
 
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Waiting for valid data... (Error: {e})")
