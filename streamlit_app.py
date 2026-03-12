@@ -226,10 +226,6 @@ if check_password():
             # --- BLANK & DUPLICATE ROOM PROTECTION ---
             room_names = [r['RoomName'] for r in rooms]
             
-            st.write("🕵️ DEBUG: Here is the exact list of rooms Pandas sees for", location, ":")
-            st.write(room_names)
-            st.write("Total rooms counted:", len(room_names))
-            
             if "" in room_names:
                 st.error("🚨 One or more rooms in this Accommodation are missing a name! Please ensure every room has a name in Google Sheets.")
                 st.stop()
