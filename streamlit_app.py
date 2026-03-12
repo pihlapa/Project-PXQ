@@ -8,7 +8,6 @@ def get_data(sheet_name):
     sheet_id = st.secrets["connections"]["gsheets"]["spreadsheet"]
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
     df = pd.read_csv(url)
-    # Clean up column names and data
     df.columns = df.columns.str.strip()
     return df
 
@@ -34,48 +33,36 @@ def parse_list(val):
 # --- 3. MAIN APP ---
 if check_password():
     try:
-        # Load raw data from all tabs
         df_prefs_raw = get_data("Preferences")
         df_rooms_raw = get_data("Rooms")
         df_hist = get_data("History")
         
-        # Merge History with Rooms for efficient capacity and empty bed calculations
-        # and create a master list of all historical assignments
         df_hist_master = None
         if not df_hist.empty and not df_rooms_raw.empty:
             df_hist_master = pd.merge(df_hist, df_rooms_raw[['Accommodation', 'RoomName', 'Capacity']], on=['Accommodation', 'RoomName'], how='left')
-            # Handle missing capacities and ensure integer type
             df_hist_master['Capacity'] = df_hist_master['Capacity'].fillna(0).astype(int)
 
         tab_solve, tab_data, tab_history = st.tabs(["🎲 Solver", "📊 Live Data", "📜 Fairness Log"])
 
         # ==========================================
-        #               DATA TAB (Upgraded)
+        #               DATA TAB
         # ==========================================
         with tab_data:
             st.subheader("Historical Arrangement Overview")
             
-            # Check for data and master list
             if df_hist_master is None or df_hist_master.empty:
                 st.info("Run the solver and save some history to see visuals.")
             else:
-                st.warning("⚠️ Happiness emojis were not saved in the history tab, so they cannot be displayed here for past arrangements. Rooms are organized by accommodation below.")
+                st.info("💡 Emojis shown here are 'Static Happiness' based on friends and gender preferences at the time of the arrangement. (⚠️ = Gender compromise)")
                 st.divider()
                 
-                # Iterate through unique accommodations in history
                 unique_accommodations = df_hist_master['Accommodation'].unique()
                 for acc_name in unique_accommodations:
-                    
                     st.markdown(f"### Trip Accommodation: {acc_name}")
-                    
-                    # Filter history for this accommodation
                     df_acc_hist = df_hist_master[df_hist_master['Accommodation'] == acc_name]
-                    
-                    # Pre-calculate counts, capacities and empty beds for this accommodation's rooms
                     df_group_counts = df_acc_hist.groupby(['Version', 'RoomName', 'Capacity']).size().reset_index(name='Occupants')
                     df_group_counts['EmptyBeds'] = df_group_counts['Capacity'] - df_group_counts['Occupants']
 
-                    # Represent each room for this accommodation
                     for index, row in df_group_counts.iterrows():
                         rm_name = row['RoomName']
                         rm_version = row['Version']
@@ -83,18 +70,43 @@ if check_password():
                         rm_occupants = row['Occupants']
                         rm_empty = row['EmptyBeds']
                         
-                        # Use an expander for each room to make it visually grouped
                         with st.expander(f"🏠 {rm_name} **[Social Map: {rm_version}]**", expanded=True):
-                            # Room header with data joins
                             st.markdown(f"**Capacity: {rm_cap}** | **Occupants: {rm_occupants}** | **Empty Beds: {rm_empty}**")
-                            
-                            # Group chat confidential message can be built efficiently here
                             occupants = df_acc_hist[(df_acc_hist['Version'] == rm_version) & (df_acc_hist['RoomName'] == rm_name)]['PersonName'].tolist()
                             
                             st.markdown("**People:**")
-                            # List occupants with a placeholder for the confidential happiness emoji
+                            # --- STATIC HAPPINESS CALCULATOR ---
                             for person in occupants:
-                                st.markdown(f"- {person} **❔ (Confidential happiness)**")
+                                emoji = "❔"
+                                person_prefs = df_prefs_raw[(df_prefs_raw['VersionName'] == rm_version) & (df_prefs_raw['Name'] == person)]
+                                
+                                if not person_prefs.empty:
+                                    p_data = person_prefs.iloc[0]
+                                    t1 = parse_list(p_data.get('Tier1'))
+                                    t2 = parse_list(p_data.get('Tier2'))
+                                    others = [n for n in occupants if n != person]
+                                    
+                                    got_t1 = any(n in others for n in t1)
+                                    got_t2 = any(n in others for n in t2)
+                                    
+                                    if not t1 and not t2: emoji = "😌"
+                                    elif got_t1: emoji = "🤩"
+                                    elif got_t2: emoji = "🙂"
+                                    else: emoji = "🫠"
+                                    
+                                    # Gender Check for the ⚠️ warning
+                                    g_pref = str(p_data.get('GenderPref', 'none')).strip().lower()
+                                    if g_pref in ['strict', 'prefer']:
+                                        my_gender = str(p_data.get('Gender', '')).strip().lower()
+                                        for other in others:
+                                            other_prefs = df_prefs_raw[(df_prefs_raw['VersionName'] == rm_version) & (df_prefs_raw['Name'] == other)]
+                                            if not other_prefs.empty:
+                                                other_gender = str(other_prefs.iloc[0].get('Gender', '')).strip().lower()
+                                                if other_gender != my_gender and other not in t1 and other not in t2:
+                                                    emoji += " ⚠️"
+                                                    break
+
+                                st.markdown(f"- {person} {emoji}")
                     st.divider()
 
             # --- Row Data Viewer ---
@@ -109,42 +121,29 @@ if check_password():
 
             # --- Copy Exporter to Chat (CONFIDENTIAL) ---
             st.subheader("Group Chat Messages")
-            st.info("Confidential message for each saved arrangement. Copy from the code box and paste into your chat.")
-
-            # Check data for messages
             if df_hist_master is None or df_hist_master.empty:
                 st.info("Save an arrangement to see its group message.")
             else:
-                # Iterate through each unique arrangement in history
                 unique_arrangements = df_hist_master[['Accommodation', 'Version']].drop_duplicates()
                 for index, arr_row in unique_arrangements.iterrows():
                     arr_acc = arr_row['Accommodation']
                     arr_ver = arr_row['Version']
                     
-                    # Group chat confidential message structure
                     msg_text = f"------------------------------------------\n\n"
-                    msg_text += f"**Trip Accommodation: {arr_acc}**\n"
-                    msg_text += f"**Social Map: {arr_ver}**\n\n"
+                    msg_text += f"**Trip Accommodation: {arr_acc}**\n\n"
                     
-                    # Filter history master for this arrangement and group people by room
                     df_arr_full = df_hist_master[(df_hist_master['Accommodation'] == arr_acc) & (df_hist_master['Version'] == arr_ver)]
                     unique_arr_rooms = df_arr_full['RoomName'].unique()
                     
                     for rm_name in unique_arr_rooms:
-                        # Data joins to get capacity for this historical room safely
-                        # The join was done for all history outside the loop
                         df_rm_data = df_arr_full[df_arr_full['RoomName'] == rm_name]
-                        # Handle case where capacity wasn't found in Rooms tab
                         arr_cap = int(df_rm_data['Capacity'].iloc[0]) if not df_rm_data['Capacity'].isna().all() else "[Capacity unknown]"
                         occupants = df_rm_data['PersonName'].tolist()
                         
-                        # Confidential message (no happiness info)
-                        msg_text += f"🏠 **{rm_name}** (Capacity: {arr_cap})\n"
+                        msg_text += f"🏠 **{rm_name}**\n"
                         msg_text += f"👥 People: {', '.join(occupants)}\n\n"
                     
                     msg_text += f"------------------------------------------"
-                    
-                    # Using st.code creates a code block with a built-in copy button!
                     st.code(msg_text, language="text")
 
         # ==========================================
@@ -160,7 +159,6 @@ if check_password():
             version = col1.selectbox("Social Map Version", v_options)
             location = col2.selectbox("Location", l_options)
 
-            # Filtering & Cleaning
             df_filtered = df_prefs_raw[df_prefs_raw['VersionName'] == version].copy()
             df_filtered['Name'] = df_filtered['Name'].astype(str).str.strip()
             
@@ -172,7 +170,6 @@ if check_password():
             people = df_filtered.set_index('Name').to_dict('index')
             rooms = df_rooms_raw[df_rooms_raw['Accommodation'] == location].to_dict('records')
             
-            # --- HISTORICAL KARMA ENGINE ---
             karma = {name: 0 for name in people.keys()}
             past_roommates = {name: set() for name in people.keys()}
             
@@ -217,7 +214,6 @@ if check_password():
                     st.error(f"Not enough beds! Need {len(names)}, only have {total_cap}.")
                     st.stop()
 
-                # --- THE SCORING FUNCTION ---
                 def calculate_score(arrangement):
                     score = 0
                     for r in rooms:
@@ -275,7 +271,6 @@ if check_password():
                                     score -= 40
                     return score
 
-                # --- SMART OPTIMIZER (HILL CLIMBING) ---
                 progress_bar = st.progress(0)
                 best_global_score = -float('inf')
                 best_global_arr = None
@@ -335,7 +330,6 @@ if check_password():
                 
                 progress_bar.empty()
 
-                # --- DISPLAY RESULTS WITH VISUALS ---
                 st.success(f"Best fit found! (Algorithm Score: {best_global_score})")
                 
                 for rm, folks in best_global_arr.items():
@@ -393,26 +387,34 @@ if check_password():
                                     st.markdown(f"- **Variety:** ✅ Satisfied")
                         st.divider()
 
-                # --- CONFIDENTIAL COPY EXPORTER (SAME AS DATA TAB LOGIC) ---
-                st.write("### 📝 Save to Chat (CONFIDENTIAL)")
-                st.info("Click the 'Copy' icon in the top right of the code box below, then paste into your group chat.")
+                # --- 1. EXPORTER FOR GOOGLE SHEETS ---
+                st.write("### 📝 Save to History (For Google Sheets)")
+                st.info("Click the 'Copy' icon top right, then paste into the first empty row of your Google Sheets 'History' tab.")
+                
+                h_rows = []
+                for rm, folks in best_global_arr.items():
+                    q = next(r['Quality'] for r in rooms if r['RoomName'] == rm)
+                    for p in folks: h_rows.append({"Accommodation": location, "PersonName": p, "RoomName": rm, "Quality": q, "Version": version})
+                
+                df_export = pd.DataFrame(h_rows)
+                tsv_text = df_export.to_csv(sep='\t', index=False, header=False)
+                st.code(tsv_text, language="text")
+
+                # --- 2. EXPORTER FOR GROUP CHAT ---
+                st.write("### 💬 Save to Chat (CONFIDENTIAL)")
+                st.info("Clean list to paste directly into your WhatsApp/group chat.")
                 
                 msg_text = f"------------------------------------------\n\n"
-                msg_text += f"**Trip Accommodation: {location}**\n"
-                msg_text += f"**Social Map: {version}**\n\n"
+                msg_text += f"**Trip Accommodation: {location}**\n\n"
                 
                 for rm, folks in best_global_arr.items():
-                    # Look up capacity from rooms data joined earlier
                     df_rm_data = df_rooms_raw[(df_rooms_raw['Accommodation'] == location) & (df_rooms_raw['RoomName'] == rm)]
                     arr_cap = int(df_rm_data['Capacity'].iloc[0]) if not df_rm_data.empty else "[Capacity unknown]"
                     
-                    # Confidential message (no happiness info)
-                    msg_text += f"🏠 **{rm}** (Capacity: {arr_cap})\n"
+                    msg_text += f"🏠 **{rm}**\n"
                     msg_text += f"👥 People: {', '.join(folks)}\n\n"
                 
                 msg_text += f"------------------------------------------"
-                
-                # Code block for easy copying
                 st.code(msg_text, language="text")
 
         # ==========================================
