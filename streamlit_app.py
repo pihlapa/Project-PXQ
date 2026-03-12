@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import random
+import requests
 
 # --- 1. SECURE DATA FETCHING ---
 def get_data(sheet_name):
@@ -14,6 +15,29 @@ def check_password():
         st.session_state["password_correct"] = False
     if st.session_state["password_correct"]:
         return True
+    if best_arr:
+    # Prepare the data to send
+    history_data = []
+    for rm, folks in best_arr.items():
+        q = next(r['Quality'] for r in rooms if r['RoomName'] == rm)
+        for p_name in folks:
+            history_data.append({
+                "Accommodation": location,
+                "PersonName": p_name,
+                "RoomName": rm,
+                "RoomQuality": q,
+                "PrefListUsed": version
+            })
+    if st.button("✅ Lock & Save to History"):
+        try:
+            response = requests.post(st.secrets["script_url"], json=history_data)
+            if response.status_code == 200:
+                st.success("🎉 History updated in Google Sheets! Next round will be even fairer.")
+                st.balloons() # Just for fun
+            else:
+                st.error("Failed to save. Check your Script URL.")
+        except Exception as e:
+            st.error(f"Error saving: {e}")
     
     # Custom login UI
     st.markdown("### 🔐 Secure Trip Access")
