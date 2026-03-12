@@ -24,6 +24,11 @@ def check_password():
         else: st.error("Incorrect password")
     return False
 
+# --- Helper: Safe List Parser ---
+def parse_list(val):
+    if pd.isna(val) or str(val).strip() == '': return []
+    return [n.strip() for n in str(val).split(',') if n.strip()]
+
 # --- 3. MAIN APP ---
 if check_password():
     try:
@@ -60,22 +65,37 @@ if check_password():
             people = df_filtered.set_index('Name').to_dict('index')
             rooms = df_rooms_raw[df_rooms_raw['Accommodation'] == location].to_dict('records')
             
-            # History & Frustration Map
-            frustration = {name: 0 for name in people.keys()}
+            # --- HISTORICAL KARMA & PAST ROOMMATES ENGINE ---
+            karma = {name: 0 for name in people.keys()}
             past_roommates = {name: set() for name in people.keys()}
             
             if not df_hist.empty:
-                for _, row in df_hist.iterrows():
-                    p_name = str(row['PersonName']).strip()
-                    if p_name in frustration:
-                        if row['RoomQuality'] < 5:
-                            frustration[p_name] += (10 - row['RoomQuality']) * 2
-                        others = df_hist[
+                for p_name in people.keys():
+                    p_hist = df_hist[df_hist['PersonName'] == p_name]
+                    for _, row in p_hist.iterrows():
+                        # 1. Quality Karma
+                        q = row['RoomQuality']
+                        if q == 1: karma[p_name] += 30
+                        elif q == 2: karma[p_name] += 10
+                        
+                        # Track past roommates
+                        others_hist = df_hist[
                             (df_hist['Accommodation'] == row['Accommodation']) & 
                             (df_hist['RoomName'] == row['RoomName']) & 
                             (df_hist['PersonName'] != p_name)
                         ]['PersonName'].tolist()
-                        past_roommates[p_name].update([str(n).strip() for n in others])
+                        past_roommates[p_name].update([str(n).strip() for n in others_hist])
+                        
+                        # 2. Isolation Karma
+                        past_prefs = df_prefs_raw[(df_prefs_raw['VersionName'] == row['Version']) & (df_prefs_raw['Name'] == p_name)]
+                        if not past_prefs.empty:
+                            p_past = past_prefs.iloc[0]
+                            t1_past = parse_list(p_past['Tier1'])
+                            t2_past = parse_list(p_past['Tier2'])
+                            got_friend = any(n in others_hist for n in t1_past) or any(n in others_hist for n in t2_past)
+                            asked_for_friend = len(t1_past) > 0 or len(t2_past) > 0
+                            if asked_for_friend and not got_friend:
+                                karma[p_name] += 30
 
             if st.button("🚀 Run Social Tetris"):
                 names = list(people.keys())
@@ -86,80 +106,129 @@ if check_password():
                     st.error(f"Not enough beds! Need {len(names)}, only have {total_cap}.")
                     st.stop()
 
-                # --- ALGORITHM ---
+                # --- ALGORITHM LOOP ---
+                progress_bar = st.progress(0)
                 for i in range(2500):
-                    random.shuffle(names)
-                    temp_arr, idx, score = {}, 0, 0
+                    temp_arr = {r['RoomName']: [] for r in rooms}
+                    available_rooms = {r['RoomName']: r['Capacity'] for r in rooms}
+                    
+                    # Distribute randomly to allow for organic empty beds!
+                    shuffled_names = list(names)
+                    random.shuffle(shuffled_names)
+                    for p in shuffled_names:
+                        valid_rooms = [rm for rm, cap in available_rooms.items() if len(temp_arr[rm]) < cap]
+                        chosen = random.choice(valid_rooms)
+                        temp_arr[chosen].append(p)
+                    
+                    score = 0
+                    
                     for r in rooms:
-                        occupants = names[idx : idx + r['Capacity']]
-                        temp_arr[r['RoomName']] = occupants
-                        idx += r['Capacity']
+                        folks = temp_arr[r['RoomName']]
                         
-                        for p_name in occupants:
+                        # Room checks
+                        if len(folks) == 0:
+                            score -= 1000000 # No entirely empty rooms
+                        
+                        empty_beds = r['Capacity'] - len(folks)
+                        score += (empty_beds * 45) # Empty bed bonus
+                        
+                        for p_name in folks:
                             p = people[p_name]
-                            others = [n for n in occupants if n != p_name]
+                            others = [n for n in folks if n != p_name]
                             
-                            s_no = [n.strip() for n in str(p['StrictNo']).split(',')] if pd.notna(p['StrictNo']) else []
-                            if any(n in others for n in s_no): score -= 10**6
+                            s_no = parse_list(p.get('StrictNo'))
+                            if any(n in others for n in s_no): score -= 1000000
                             
-                            t1 = [n.strip() for n in str(p['Tier1']).split(',')] if pd.notna(p['Tier1']) else []
-                            t2 = [n.strip() for n in str(p['Tier2']).split(',')] if pd.notna(p['Tier2']) else []
+                            t1 = parse_list(p.get('Tier1'))
+                            t2 = parse_list(p.get('Tier2'))
                             
-                            if any(n in others for n in t1): score += 100
-                            for n in others:
-                                if n in t2: score += 30
+                            t1_met = [n for n in others if n in t1]
+                            t2_met = [n for n in others if n in t2]
                             
-                            # Gender Preference Logic
-                            g_pref = str(p.get('GenderPref', '')).strip().lower()
+                            got_t1 = len(t1_met) > 0
+                            got_t2 = len(t2_met) > 0
+                            is_isolated = not got_t1 and not got_t2
+                            
+                            # Friends Math
+                            if got_t1:
+                                score += 500
+                                bonus_friends = (len(t1_met) - 1) + len(t2_met)
+                                score += (bonus_friends * 50)
+                            elif got_t2:
+                                score += 200
+                                bonus_friends = len(t2_met) - 1
+                                score += (bonus_friends * 50)
+                            
+                            # Isolation Math
+                            if is_isolated:
+                                if len(t1) > 0: score -= 400
+                                elif len(t2) > 0: score -= 200
+                                
+                            # Room Quality & Consolation
+                            base_q = r['Quality'] * 20
+                            if is_isolated and (len(t1) > 0 or len(t2) > 0):
+                                score += (base_q * 3) # Triple points if isolated
+                            else:
+                                score += base_q
+                                
+                            # Karma Tie-Breaker
+                            score += karma[p_name]
+                            
+                            # Gender Math
+                            g_pref = str(p.get('GenderPref', 'none')).strip().lower()
                             my_gender = str(p.get('Gender', '')).strip().lower()
                             if g_pref in ['strict', 'prefer']:
-                                illegal_genders = [n for n in others if str(people[n].get('Gender', '')).strip().lower() != my_gender and n not in t1 and n not in t2]
-                                if illegal_genders:
-                                    score -= (150 if g_pref == 'strict' else 60)
+                                mismatches = [n for n in others if str(people[n].get('Gender', '')).strip().lower() != my_gender and n not in t1 and n not in t2]
+                                if mismatches:
+                                    score -= (800 if g_pref == 'strict' else 150)
 
-                            # New People Variety Logic
+                            # Variety Math (Only punish if ZERO new faces)
                             is_new_people = str(p.get('NewPeople', '')).strip().lower() == 'true' or p.get('NewPeople') == True
-                            if is_new_people:
-                                for roommate in others:
-                                    if roommate in past_roommates[p_name] and roommate not in t1 and roommate not in t2:
-                                        score -= 50 
-                            
-                            # Fairness/Frustration
-                            score += (r['Quality'] * 10) + (frustration[p_name] * 1.5)
+                            if is_new_people and len(others) > 0:
+                                past_in_room = [n for n in others if n in past_roommates[p_name] and n not in t1 and n not in t2]
+                                if len(past_in_room) == len(others): # EVERYONE is a past roommate
+                                    score -= 40
                     
                     if score > best_score:
                         best_score, best_arr = score, temp_arr
+                    
+                    if i % 250 == 0: progress_bar.progress(i / 2500)
+                
+                progress_bar.empty()
 
                 # --- DISPLAY RESULTS WITH VISUALS ---
                 st.success(f"Best fit found! (Algorithm Score: {best_score})")
                 
                 for rm, folks in best_arr.items():
                     q = next(r['Quality'] for r in rooms if r['RoomName'] == rm)
+                    cap = next(r['Capacity'] for r in rooms if r['RoomName'] == rm)
+                    empty_beds = cap - len(folks)
                     
-                    # 1. High-level summary string
+                    bed_str = f"🛏️ {empty_beds} Empty Bed{'s' if empty_beds > 1 else ''}" if empty_beds > 0 else "Full"
+                    
+                    # High-level summary string
                     summary_parts = []
                     for p_name in folks:
                         p = people[p_name]
                         others = [n for n in folks if n != p_name]
-                        t1 = [n.strip() for n in str(p['Tier1']).split(',')] if pd.notna(p['Tier1']) and str(p['Tier1']).strip() else []
-                        t2 = [n.strip() for n in str(p['Tier2']).split(',')] if pd.notna(p['Tier2']) and str(p['Tier2']).strip() else []
+                        t1 = parse_list(p.get('Tier1'))
+                        t2 = parse_list(p.get('Tier2'))
                         
-                        if not t1 and not t2: emoji = "😌"
-                        elif any(n in others for n in t1): emoji = "🤩"
-                        elif any(n in others for n in t2): emoji = "🙂"
-                        else: emoji = "🫠"
+                        if not t1 and not t2: emoji = "😌" # No asks
+                        elif any(n in others for n in t1): emoji = "🤩" # T1
+                        elif any(n in others for n in t2): emoji = "🙂" # T2
+                        else: emoji = "🫠" # Isolated
                         
                         summary_parts.append(f"{p_name} {emoji}")
 
-                    # 2. Expander with Room Quality and Detailed Breakdown
-                    with st.expander(f"🏠 {rm} (Quality: {q}/10)  ➔  {', '.join(summary_parts)}", expanded=True):
+                    # Expander Breakdown
+                    with st.expander(f"🏠 {rm} (Quality: {q}/5) [{bed_str}] ➔ {', '.join(summary_parts)}", expanded=True):
                         st.markdown("### Room Breakdown")
                         for p_name in folks:
                             p = people[p_name]
                             others = [n for n in folks if n != p_name]
-                            
-                            t1 = [n.strip() for n in str(p['Tier1']).split(',')] if pd.notna(p['Tier1']) and str(p['Tier1']).strip() else []
-                            t2 = [n.strip() for n in str(p['Tier2']).split(',')] if pd.notna(p['Tier2']) and str(p['Tier2']).strip() else []
+                            t1 = parse_list(p.get('Tier1'))
+                            t2 = parse_list(p.get('Tier2'))
                             g_pref = str(p.get('GenderPref', 'none')).strip().lower()
                             my_gender = str(p.get('Gender', '')).strip().lower()
                             is_new_people = str(p.get('NewPeople', '')).strip().lower() == 'true' or p.get('NewPeople') == True
@@ -167,8 +236,7 @@ if check_password():
                             st.markdown(f"**{p_name}**")
                             
                             # Tiers display
-                            if not t1 and not t2:
-                                st.markdown("- *No specific friends requested*")
+                            if not t1 and not t2: st.markdown("- *😌 No specific friends requested*")
                             if t1:
                                 t1_status = ", ".join([f"✅ {n}" if n in others else f"❌ {n}" for n in t1])
                                 st.markdown(f"- **Tier 1:** {t1_status}")
@@ -179,26 +247,21 @@ if check_password():
                             # Gender display
                             if g_pref in ['strict', 'prefer']:
                                 mismatches = [n for n in others if str(people[n].get('Gender', '')).strip().lower() != my_gender and n not in t1 and n not in t2]
-                                if mismatches:
-                                    st.markdown(f"- **Gender ({g_pref.title()}):** ❌ Mixed with {', '.join(mismatches)}")
-                                else:
-                                    st.markdown(f"- **Gender ({g_pref.title()}):** ✅ Match (or with requested friends)")
-                            else:
-                                st.markdown("- **Gender:** 😌 No preference")
-
-                            # New People display
-                            if is_new_people:
-                                past_in_room = [n for n in others if n in past_roommates[p_name] and n not in t1 and n not in t2]
-                                if past_in_room:
-                                    st.markdown(f"- **Variety:** ❌ With past roommates ({', '.join(past_in_room)})")
-                                else:
-                                    st.markdown(f"- **Variety:** ✅ All new faces (or requested friends)")
+                                if mismatches: st.markdown(f"- **Gender ({g_pref.title()}):** ❌ Mixed with {', '.join(mismatches)}")
+                                else: st.markdown(f"- **Gender ({g_pref.title()}):** ✅ Match")
                             
+                            # New People display
+                            if is_new_people and len(others) > 0:
+                                past_in_room = [n for n in others if n in past_roommates[p_name] and n not in t1 and n not in t2]
+                                if len(past_in_room) == len(others):
+                                    st.markdown(f"- **Variety:** ❌ 0 new faces (With {', '.join(past_in_room)})")
+                                else:
+                                    st.markdown(f"- **Variety:** ✅ Satisfied")
                         st.divider()
 
                 # --- EASY COPY EXPORTER ---
                 st.write("### 📝 Save to History")
-                st.info("Click the 'Copy' icon in the top right of the box below, then paste into the first empty row of your Google Sheets 'History' tab.")
+                st.info("Click the 'Copy' icon top right, then paste into the first empty row of your Google Sheets 'History' tab.")
                 
                 h_rows = []
                 for rm, folks in best_arr.items():
@@ -211,7 +274,8 @@ if check_password():
 
         with tab_history:
             st.subheader("Fairness Ledger")
-            st.bar_chart(pd.Series(frustration))
+            st.write("Current Accumulated Karma (Higher = Gets priority for better rooms)")
+            st.bar_chart(pd.Series(karma))
             st.write("**Past Roommates (Rotating targets):**")
             st.json({k: list(v) for k, v in past_roommates.items() if v})
 
