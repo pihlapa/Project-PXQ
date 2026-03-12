@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import random
+import copy
 
 # --- 1. SECURE DATA FETCHING ---
 def get_data(sheet_name):
@@ -65,72 +66,61 @@ if check_password():
             people = df_filtered.set_index('Name').to_dict('index')
             rooms = df_rooms_raw[df_rooms_raw['Accommodation'] == location].to_dict('records')
             
-            # --- HISTORICAL KARMA & PAST ROOMMATES ENGINE ---
+            # --- HISTORICAL KARMA ENGINE ---
             karma = {name: 0 for name in people.keys()}
             past_roommates = {name: set() for name in people.keys()}
             
             if not df_hist.empty:
                 for p_name in people.keys():
+                    if 'PersonName' not in df_hist.columns: continue
                     p_hist = df_hist[df_hist['PersonName'] == p_name]
                     for _, row in p_hist.iterrows():
-                        # 1. Quality Karma
-                        q = row['RoomQuality']
-                        if q == 1: karma[p_name] += 30
-                        elif q == 2: karma[p_name] += 10
+                        q = row.get('Quality', row.get('RoomQuality', 3)) 
+                        if pd.notna(q):
+                            try:
+                                q = int(q)
+                                if q == 1: karma[p_name] += 30
+                                elif q == 2: karma[p_name] += 10
+                            except: pass
                         
-                        # Track past roommates
-                        others_hist = df_hist[
-                            (df_hist['Accommodation'] == row['Accommodation']) & 
-                            (df_hist['RoomName'] == row['RoomName']) & 
-                            (df_hist['PersonName'] != p_name)
-                        ]['PersonName'].tolist()
-                        past_roommates[p_name].update([str(n).strip() for n in others_hist])
+                        if 'Accommodation' in df_hist.columns and 'RoomName' in df_hist.columns:
+                            others_hist = df_hist[
+                                (df_hist['Accommodation'] == row['Accommodation']) & 
+                                (df_hist['RoomName'] == row['RoomName']) & 
+                                (df_hist['PersonName'] != p_name)
+                            ]['PersonName'].tolist()
+                            past_roommates[p_name].update([str(n).strip() for n in others_hist])
                         
-                        # 2. Isolation Karma
-                        past_prefs = df_prefs_raw[(df_prefs_raw['VersionName'] == row['Version']) & (df_prefs_raw['Name'] == p_name)]
-                        if not past_prefs.empty:
-                            p_past = past_prefs.iloc[0]
-                            t1_past = parse_list(p_past['Tier1'])
-                            t2_past = parse_list(p_past['Tier2'])
-                            got_friend = any(n in others_hist for n in t1_past) or any(n in others_hist for n in t2_past)
-                            asked_for_friend = len(t1_past) > 0 or len(t2_past) > 0
-                            if asked_for_friend and not got_friend:
-                                karma[p_name] += 30
+                        hist_version = row.get('Version', row.get('PrefListUsed', ''))
+                        if pd.notna(hist_version):
+                            past_prefs = df_prefs_raw[(df_prefs_raw['VersionName'] == hist_version) & (df_prefs_raw['Name'] == p_name)]
+                            if not past_prefs.empty:
+                                p_past = past_prefs.iloc[0]
+                                t1_past = parse_list(p_past['Tier1'])
+                                t2_past = parse_list(p_past['Tier2'])
+                                if 'others_hist' in locals():
+                                    got_friend = any(n in others_hist for n in t1_past) or any(n in others_hist for n in t2_past)
+                                    asked_for_friend = len(t1_past) > 0 or len(t2_past) > 0
+                                    if asked_for_friend and not got_friend:
+                                        karma[p_name] += 30
 
             if st.button("🚀 Run Social Tetris"):
                 names = list(people.keys())
-                best_arr, best_score = None, -float('inf')
-                
                 total_cap = sum(r['Capacity'] for r in rooms)
                 if total_cap < len(names):
                     st.error(f"Not enough beds! Need {len(names)}, only have {total_cap}.")
                     st.stop()
 
-                # --- ALGORITHM LOOP ---
-                progress_bar = st.progress(0)
-                for i in range(2500):
-                    temp_arr = {r['RoomName']: [] for r in rooms}
-                    available_rooms = {r['RoomName']: r['Capacity'] for r in rooms}
-                    
-                    # Distribute randomly to allow for organic empty beds!
-                    shuffled_names = list(names)
-                    random.shuffle(shuffled_names)
-                    for p in shuffled_names:
-                        valid_rooms = [rm for rm, cap in available_rooms.items() if len(temp_arr[rm]) < cap]
-                        chosen = random.choice(valid_rooms)
-                        temp_arr[chosen].append(p)
-                    
+                # --- THE SCORING FUNCTION ---
+                def calculate_score(arrangement):
                     score = 0
-                    
                     for r in rooms:
-                        folks = temp_arr[r['RoomName']]
-                        
-                        # Room checks
+                        folks = arrangement[r['RoomName']]
                         if len(folks) == 0:
-                            score -= 1000000 # No entirely empty rooms
+                            score -= 1000000 # No completely empty rooms allowed
                         
-                        empty_beds = r['Capacity'] - len(folks)
-                        score += (empty_beds * 45) # Empty bed bonus
+                        # Exponential Crowding Penalty (discourages packing people in unless friends)
+                        score -= (len(folks) ** 2 * 10)
                         
                         for p_name in folks:
                             p = people[p_name]
@@ -149,64 +139,112 @@ if check_password():
                             got_t2 = len(t2_met) > 0
                             is_isolated = not got_t1 and not got_t2
                             
-                            # Friends Math
                             if got_t1:
                                 score += 500
-                                bonus_friends = (len(t1_met) - 1) + len(t2_met)
-                                score += (bonus_friends * 50)
+                                score += ((len(t1_met) - 1) + len(t2_met)) * 50
                             elif got_t2:
                                 score += 200
-                                bonus_friends = len(t2_met) - 1
-                                score += (bonus_friends * 50)
+                                score += (len(t2_met) - 1) * 50
                             
-                            # Isolation Math
                             if is_isolated:
                                 if len(t1) > 0: score -= 400
                                 elif len(t2) > 0: score -= 200
                                 
-                            # Room Quality & Consolation
                             base_q = r['Quality'] * 20
-                            if is_isolated and (len(t1) > 0 or len(t2) > 0):
-                                score += (base_q * 3) # Triple points if isolated
-                            else:
-                                score += base_q
+                            if is_isolated and (len(t1) > 0 or len(t2) > 0): score += (base_q * 3) 
+                            else: score += base_q
                                 
-                            # Karma Tie-Breaker
                             score += karma[p_name]
                             
-                            # Gender Math
                             g_pref = str(p.get('GenderPref', 'none')).strip().lower()
                             my_gender = str(p.get('Gender', '')).strip().lower()
                             if g_pref in ['strict', 'prefer']:
                                 mismatches = [n for n in others if str(people[n].get('Gender', '')).strip().lower() != my_gender and n not in t1 and n not in t2]
                                 if mismatches:
-                                    score -= (800 if g_pref == 'strict' else 150)
+                                    # STRICT IS NOW A DEALBREAKER
+                                    score -= (1000000 if g_pref == 'strict' else 150)
 
-                            # Variety Math (Only punish if ZERO new faces)
                             is_new_people = str(p.get('NewPeople', '')).strip().lower() == 'true' or p.get('NewPeople') == True
                             if is_new_people and len(others) > 0:
                                 past_in_room = [n for n in others if n in past_roommates[p_name] and n not in t1 and n not in t2]
-                                if len(past_in_room) == len(others): # EVERYONE is a past roommate
+                                if len(past_in_room) == len(others): 
                                     score -= 40
+                    return score
+
+                # --- SMART OPTIMIZER (HILL CLIMBING) ---
+                progress_bar = st.progress(0)
+                best_global_score = -float('inf')
+                best_global_arr = None
+
+                # We will try 15 completely different random starting points
+                for restart in range(15):
+                    # Create valid random starting layout
+                    current_arr = {r['RoomName']: [] for r in rooms}
+                    avail = {r['RoomName']: r['Capacity'] for r in rooms}
+                    shuffled = list(names)
+                    random.shuffle(shuffled)
+                    for p in shuffled:
+                        valid_rooms = [rm for rm, cap in avail.items() if len(current_arr[rm]) < cap]
+                        current_arr[random.choice(valid_rooms)].append(p)
                     
-                    if score > best_score:
-                        best_score, best_arr = score, temp_arr
+                    current_score = calculate_score(current_arr)
                     
-                    if i % 250 == 0: progress_bar.progress(i / 2500)
+                    # Try 1,000 smart swaps per starting point
+                    for step in range(1000):
+                        new_arr = copy.deepcopy(current_arr)
+                        r1, r2 = random.sample(list(new_arr.keys()), 2)
+                        
+                        move_type = random.choice([1, 2, 3]) # 1: Swap, 2: Move to r2, 3: Move to r1
+                        valid_move = False
+                        
+                        if move_type == 1 and new_arr[r1] and new_arr[r2]:
+                            p1 = random.choice(new_arr[r1])
+                            p2 = random.choice(new_arr[r2])
+                            new_arr[r1].remove(p1)
+                            new_arr[r1].append(p2)
+                            new_arr[r2].remove(p2)
+                            new_arr[r2].append(p1)
+                            valid_move = True
+                        elif move_type == 2 and new_arr[r1]:
+                            cap2 = next(r['Capacity'] for r in rooms if r['RoomName'] == r2)
+                            if len(new_arr[r2]) < cap2:
+                                p1 = random.choice(new_arr[r1])
+                                new_arr[r1].remove(p1)
+                                new_arr[r2].append(p1)
+                                valid_move = True
+                        elif move_type == 3 and new_arr[r2]:
+                            cap1 = next(r['Capacity'] for r in rooms if r['RoomName'] == r1)
+                            if len(new_arr[r1]) < cap1:
+                                p2 = random.choice(new_arr[r2])
+                                new_arr[r2].remove(p2)
+                                new_arr[r1].append(p2)
+                                valid_move = True
+                                
+                        if valid_move:
+                            new_score = calculate_score(new_arr)
+                            # Keep the swap if it's better or equal
+                            if new_score >= current_score:
+                                current_arr = new_arr
+                                current_score = new_score
+
+                    if current_score > best_global_score:
+                        best_global_score = current_score
+                        best_global_arr = current_arr
+                        
+                    progress_bar.progress((restart + 1) / 15)
                 
                 progress_bar.empty()
 
                 # --- DISPLAY RESULTS WITH VISUALS ---
-                st.success(f"Best fit found! (Algorithm Score: {best_score})")
+                st.success(f"Best fit found! (Algorithm Score: {best_global_score})")
                 
-                for rm, folks in best_arr.items():
+                for rm, folks in best_global_arr.items():
                     q = next(r['Quality'] for r in rooms if r['RoomName'] == rm)
                     cap = next(r['Capacity'] for r in rooms if r['RoomName'] == rm)
                     empty_beds = cap - len(folks)
                     
                     bed_str = f"🛏️ {empty_beds} Empty Bed{'s' if empty_beds > 1 else ''}" if empty_beds > 0 else "Full"
                     
-                    # High-level summary string
                     summary_parts = []
                     for p_name in folks:
                         p = people[p_name]
@@ -214,14 +252,13 @@ if check_password():
                         t1 = parse_list(p.get('Tier1'))
                         t2 = parse_list(p.get('Tier2'))
                         
-                        if not t1 and not t2: emoji = "😌" # No asks
-                        elif any(n in others for n in t1): emoji = "🤩" # T1
-                        elif any(n in others for n in t2): emoji = "🙂" # T2
-                        else: emoji = "🫠" # Isolated
+                        if not t1 and not t2: emoji = "😌" 
+                        elif any(n in others for n in t1): emoji = "🤩" 
+                        elif any(n in others for n in t2): emoji = "🙂" 
+                        else: emoji = "🫠" 
                         
                         summary_parts.append(f"{p_name} {emoji}")
 
-                    # Expander Breakdown
                     with st.expander(f"🏠 {rm} (Quality: {q}/5) [{bed_str}] ➔ {', '.join(summary_parts)}", expanded=True):
                         st.markdown("### Room Breakdown")
                         for p_name in folks:
@@ -235,7 +272,6 @@ if check_password():
 
                             st.markdown(f"**{p_name}**")
                             
-                            # Tiers display
                             if not t1 and not t2: st.markdown("- *😌 No specific friends requested*")
                             if t1:
                                 t1_status = ", ".join([f"✅ {n}" if n in others else f"❌ {n}" for n in t1])
@@ -244,13 +280,11 @@ if check_password():
                                 t2_status = ", ".join([f"✅ {n}" if n in others else f"❌ {n}" for n in t2])
                                 st.markdown(f"- **Tier 2:** {t2_status}")
                             
-                            # Gender display
                             if g_pref in ['strict', 'prefer']:
                                 mismatches = [n for n in others if str(people[n].get('Gender', '')).strip().lower() != my_gender and n not in t1 and n not in t2]
                                 if mismatches: st.markdown(f"- **Gender ({g_pref.title()}):** ❌ Mixed with {', '.join(mismatches)}")
                                 else: st.markdown(f"- **Gender ({g_pref.title()}):** ✅ Match")
                             
-                            # New People display
                             if is_new_people and len(others) > 0:
                                 past_in_room = [n for n in others if n in past_roommates[p_name] and n not in t1 and n not in t2]
                                 if len(past_in_room) == len(others):
@@ -264,7 +298,7 @@ if check_password():
                 st.info("Click the 'Copy' icon top right, then paste into the first empty row of your Google Sheets 'History' tab.")
                 
                 h_rows = []
-                for rm, folks in best_arr.items():
+                for rm, folks in best_global_arr.items():
                     q = next(r['Quality'] for r in rooms if r['RoomName'] == rm)
                     for p in folks: h_rows.append({"Accommodation": location, "PersonName": p, "RoomName": rm, "Quality": q, "Version": version})
                 
