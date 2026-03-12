@@ -34,6 +34,7 @@ def parse_list(val):
 def clean_str(val):
     if pd.isna(val): return ""
     s = str(val).strip()
+    if s.lower() == 'nan': return ""
     if s.endswith('.0'): s = s[:-2]
     return s
 
@@ -65,10 +66,12 @@ if check_password():
         
         # 2. GLOBAL DATA SANITIZATION (Fixes merge and capacity bugs)
         if not df_rooms_raw.empty:
-            df_rooms_raw['RoomName'] = df_rooms_raw['RoomName'].apply(clean_str)
-            # --- KILL GHOST ROWS ---
-            df_rooms_raw = df_rooms_raw[df_rooms_raw['RoomName'] != ""]
             df_rooms_raw['Accommodation'] = df_rooms_raw['Accommodation'].apply(clean_str)
+            df_rooms_raw['RoomName'] = df_rooms_raw['RoomName'].apply(clean_str)
+            
+            # --- KILL ONLY TRUE GHOST ROWS (Where BOTH Accommodation & RoomName are blank) ---
+            df_rooms_raw = df_rooms_raw[~((df_rooms_raw['Accommodation'] == "") & (df_rooms_raw['RoomName'] == ""))]
+            
             df_rooms_raw['Capacity'] = pd.to_numeric(df_rooms_raw['Capacity'], errors='coerce').fillna(0).astype(int)
             
         if not df_hist.empty:
@@ -220,8 +223,13 @@ if check_password():
             people = df_filtered.set_index('Name').to_dict('index')
             rooms = df_rooms_raw[df_rooms_raw['Accommodation'] == location].to_dict('records')
             
-            # --- DUPLICATE ROOM PROTECTION ---
+            # --- BLANK & DUPLICATE ROOM PROTECTION ---
             room_names = [r['RoomName'] for r in rooms]
+            
+            if "" in room_names:
+                st.error("🚨 One or more rooms in this Accommodation are missing a name! Please ensure every room has a name in Google Sheets.")
+                st.stop()
+                
             if len(room_names) != len(set(room_names)):
                 st.error("🚨 Duplicate Room Names detected in your Google Sheet for this Accommodation! Please make sure every room has a unique name (e.g. Room 1, Room 2).")
                 st.stop()
@@ -230,6 +238,9 @@ if check_password():
             past_roommates = {name: set() for name in people.keys()}
             
             if not df_hist.empty:
+                df_hist['RoomName'] = df_hist['RoomName'].apply(clean_str)
+                df_hist['Accommodation'] = df_hist['Accommodation'].apply(clean_str)
+                
                 for p_name in people.keys():
                     if 'PersonName' not in df_hist.columns: continue
                     p_hist = df_hist[df_hist['PersonName'] == p_name]
