@@ -2,18 +2,17 @@ import streamlit as st
 import pandas as pd
 import random
 
-# --- 1. SECURE DATA FETCHING ---
+# --- 1. DATA FETCHING ---
 def get_data(sheet_name):
     sheet_id = st.secrets["connections"]["gsheets"]["spreadsheet"]
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
     return pd.read_csv(url)
 
-# --- 2. LOGIN LOGIC ---
+# --- 2. LOGIN ---
 def check_password():
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
     if st.session_state["password_correct"]: return True
-    
     st.markdown("### 🔐 Secure Trip Access")
     pwd = st.text_input("Enter Trip Password", type="password")
     if st.button("Log In"):
@@ -35,23 +34,31 @@ if check_password():
         with tab_solve:
             st.subheader("Generate Arrangement")
             
-            # Select Version and Location
-            v_options = df_prefs['VersionName'].unique()
-            l_options = df_rooms['Accommodation'].unique()
-            
             col1, col2 = st.columns(2)
-            version = col1.selectbox("Social Map", v_options)
-            location = col2.selectbox("Location", l_options)
+            version = col1.selectbox("Social Map", df_prefs['VersionName'].unique())
+            location = col2.selectbox("Location", df_rooms['Accommodation'].unique())
 
             people = df_prefs[df_prefs['VersionName'] == version].set_index('Name').to_dict('index')
             rooms = df_rooms[df_rooms['Accommodation'] == location].to_dict('records')
             
-            # Calculate Frustration from History
+            # PRE-CALCULATE HISTORY MAPS
             frustration = {name: 0 for name in people.keys()}
+            past_roommates = {name: set() for name in people.keys()}
+            
             for _, row in df_hist.iterrows():
-                if row['PersonName'] in frustration:
+                p_name = row['PersonName']
+                if p_name in frustration:
+                    # Quality Frustration
                     if row['RoomQuality'] < 5:
-                        frustration[row['PersonName']] += (10 - row['RoomQuality']) * 2
+                        frustration[p_name] += (10 - row['RoomQuality']) * 2
+                    
+                    # Find who else was in that room at that time
+                    others_in_past_room = df_hist[
+                        (df_hist['Accommodation'] == row['Accommodation']) & 
+                        (df_hist['RoomName'] == row['RoomName']) & 
+                        (df_hist['PersonName'] != p_name)
+                    ]['PersonName'].tolist()
+                    past_roommates[p_name].update(others_in_past_room)
 
             if st.button("🚀 Run Social Tetris"):
                 names = list(people.keys())
@@ -64,18 +71,30 @@ if check_password():
                         occupants = names[idx : idx + r['Capacity']]
                         temp_arr[r['RoomName']] = occupants
                         idx += r['Capacity']
+                        
                         for p_name in occupants:
                             p = people[p_name]
                             others = [n for n in occupants if n != p_name]
                             
-                            # Scoring
+                            # 1. Strict No
                             s_no = str(p['StrictNo']).split(',') if pd.notna(p['StrictNo']) else []
                             if any(n.strip() in others for n in s_no): score -= 10**6
-                            t1 = str(p['Tier1']).split(',') if pd.notna(p['Tier1']) else []
-                            if any(n.strip() in others for n in t1): score += 100
-                            t2 = str(p['Tier2']).split(',') if pd.notna(p['Tier2']) else []
+                            
+                            # 2. Tiers
+                            t1 = [n.strip() for n in str(p['Tier1']).split(',')] if pd.notna(p['Tier1']) else []
+                            t2 = [n.strip() for n in str(p['Tier2']).split(',')] if pd.notna(p['Tier2']) else []
+                            
+                            if any(n in others for n in t1): score += 100
                             for n in others:
-                                if n.strip() in t2: score += 30
+                                if n in t2: score += 30
+                            
+                            # 3. New People Preference (The Variety Penalty)
+                            if p['NewPeople'] == True:
+                                for roommate in others:
+                                    if roommate in past_roommates[p_name]:
+                                        # Penalty only applies if they AREN'T a requested friend
+                                        if roommate not in t1 and roommate not in t2:
+                                            score -= 50 
                             
                             score += (r['Quality'] * 10) + (frustration[p_name] * 1.5)
                     
@@ -83,29 +102,24 @@ if check_password():
                         best_score, best_arr = score, temp_arr
 
                 st.success(f"Best fit found (Score: {best_score})")
-                
-                # DISPLAY ROOMS
                 for rm, folks in best_arr.items():
                     with st.expander(f"🏠 {rm}", expanded=True):
                         st.write(", ".join(folks))
                 
-                # MANUAL ENTRY ASSISTANT
+                # Manual Entry Helper
                 st.divider()
-                st.write("### 📝 Copy this to Google Sheets 'History' tab:")
-                history_rows = []
+                st.write("### 📝 Copy to 'History' tab:")
+                h_rows = []
                 for rm, folks in best_arr.items():
                     q = next(r['Quality'] for r in rooms if r['RoomName'] == rm)
-                    for p in folks:
-                        history_rows.append([location, p, rm, q, version])
-                
-                # Show as a table you can easily read from your phone
-                st.table(pd.DataFrame(history_rows, columns=["Accommodation", "PersonName", "RoomName", "Quality", "Version"]))
+                    for p in folks: h_rows.append([location, p, rm, q, version])
+                st.table(pd.DataFrame(h_rows, columns=["Accommodation", "PersonName", "RoomName", "Quality", "Version"]))
 
         with tab_history:
             st.subheader("Fairness Ledger")
-            st.write("Higher bars = these people deserve the best rooms next time!")
             st.bar_chart(pd.Series(frustration))
-            st.dataframe(df_hist)
+            st.write("**Known Past Roommates (to avoid if 'NewPeople' is True):**")
+            st.json({k: list(v) for k, v in past_roommates.items() if v})
 
     except Exception as e:
         st.error(f"Waiting for valid data... (Error: {e})")
