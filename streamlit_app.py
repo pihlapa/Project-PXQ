@@ -66,6 +66,8 @@ if check_password():
         # 2. GLOBAL DATA SANITIZATION (Fixes merge and capacity bugs)
         if not df_rooms_raw.empty:
             df_rooms_raw['RoomName'] = df_rooms_raw['RoomName'].apply(clean_str)
+            # --- KILL GHOST ROWS ---
+            df_rooms_raw = df_rooms_raw[df_rooms_raw['RoomName'] != ""]
             df_rooms_raw['Accommodation'] = df_rooms_raw['Accommodation'].apply(clean_str)
             df_rooms_raw['Capacity'] = pd.to_numeric(df_rooms_raw['Capacity'], errors='coerce').fillna(0).astype(int)
             
@@ -206,6 +208,9 @@ if check_password():
 
             df_filtered = df_prefs_raw[df_prefs_raw['VersionName'] == version].copy()
             df_filtered['Name'] = df_filtered['Name'].astype(str).str.strip()
+            
+            # --- KILL GHOST ROWS IN PREFERENCES ---
+            df_filtered = df_filtered[df_filtered['Name'] != ""]
             
             duplicate_names = df_filtered[df_filtered.duplicated(['Name'])]['Name'].tolist()
             if duplicate_names:
