@@ -30,6 +30,9 @@ def parse_list(val):
     if pd.isna(val) or str(val).strip() == '': return []
     return [n.strip() for n in str(val).split(',') if n.strip()]
 
+# Fun emojis for group chat rooms
+CHAT_EMOJIS = ["🍕", "🚀", "👑", "🌴", "⛺", "🎸", "🌻", "🥑", "🎨", "🛶", "🌵", "🍍", "🐬", "🌙", "🎲", "🔥", "🔮", "🍀", "🍩", "🧊", "🍄", "🍉"]
+
 # --- 3. MAIN APP ---
 if check_password():
     try:
@@ -39,7 +42,6 @@ if check_password():
         
         df_hist_master = None
         if not df_hist.empty and not df_rooms_raw.empty:
-            # --- THE FIX: Force matching columns to be strings to prevent merge errors ---
             df_hist['RoomName'] = df_hist['RoomName'].astype(str).str.strip()
             df_hist['Accommodation'] = df_hist['Accommodation'].astype(str).str.strip()
             df_rooms_raw['RoomName'] = df_rooms_raw['RoomName'].astype(str).str.strip()
@@ -59,61 +61,86 @@ if check_password():
             if df_hist_master is None or df_hist_master.empty:
                 st.info("Run the solver and save some history to see visuals.")
             else:
-                st.info("💡 Emojis shown here are 'Static Happiness' based on friends and gender preferences at the time of the arrangement. (⚠️ = Gender compromise)")
+                st.markdown("**Color Key:** 🟩 Happy (Got T1 / No requests) | 🟨 Compromised (T2) | 🟧 Isolated (No wishes met)")
                 st.divider()
                 
                 unique_accommodations = df_hist_master['Accommodation'].unique()
                 for acc_name in unique_accommodations:
-                    st.markdown(f"### Trip Accommodation: {acc_name}")
+                    st.markdown(f"### {acc_name}")
+                    
                     df_acc_hist = df_hist_master[df_hist_master['Accommodation'] == acc_name]
-                    df_group_counts = df_acc_hist.groupby(['Version', 'RoomName', 'Capacity']).size().reset_index(name='Occupants')
-                    df_group_counts['EmptyBeds'] = df_group_counts['Capacity'] - df_group_counts['Occupants']
-
-                    for index, row in df_group_counts.iterrows():
-                        rm_name = row['RoomName']
-                        rm_version = row['Version']
-                        rm_cap = row['Capacity']
-                        rm_occupants = row['Occupants']
-                        rm_empty = row['EmptyBeds']
+                    # We assume one version per accommodation in history for the grid view
+                    rm_version = df_acc_hist['Version'].iloc[0] 
+                    
+                    unique_rooms = df_acc_hist['RoomName'].unique()
+                    
+                    # 1. Figure out max rows needed for the table (max capacity across these rooms)
+                    max_cap = 0
+                    for rm in unique_rooms:
+                        rm_cap = df_acc_hist[df_acc_hist['RoomName'] == rm]['Capacity'].max()
+                        if pd.isna(rm_cap) or rm_cap == 0:
+                            rm_cap = len(df_acc_hist[df_acc_hist['RoomName'] == rm])
+                        max_cap = max(max_cap, int(rm_cap))
+                    
+                    # 2. Build the Grid Data and the CSS Style Data
+                    grid_data = {}
+                    style_data = {}
+                    
+                    for rm in unique_rooms:
+                        df_rm = df_acc_hist[df_acc_hist['RoomName'] == rm]
+                        occupants = df_rm['PersonName'].tolist()
+                        rm_cap = int(df_rm['Capacity'].max()) if not pd.isna(df_rm['Capacity'].max()) and df_rm['Capacity'].max() > 0 else len(occupants)
                         
-                        with st.expander(f"🏠 {rm_name} **[Social Map: {rm_version}]**", expanded=True):
-                            st.markdown(f"**Capacity: {rm_cap}** | **Occupants: {rm_occupants}** | **Empty Beds: {rm_empty}**")
-                            occupants = df_acc_hist[(df_acc_hist['Version'] == rm_version) & (df_acc_hist['RoomName'] == rm_name)]['PersonName'].tolist()
+                        col_text = []
+                        col_style = []
+                        
+                        for person in occupants:
+                            person_prefs = df_prefs_raw[(df_prefs_raw['VersionName'] == rm_version) & (df_prefs_raw['Name'] == person)]
+                            color = "background-color: #A7D3A6; color: black;" # Default Green (Happy / No reqs)
                             
-                            st.markdown("**People:**")
-                            for person in occupants:
-                                emoji = "❔"
-                                person_prefs = df_prefs_raw[(df_prefs_raw['VersionName'] == rm_version) & (df_prefs_raw['Name'] == person)]
+                            if not person_prefs.empty:
+                                p_data = person_prefs.iloc[0]
+                                t1 = parse_list(p_data.get('Tier1'))
+                                t2 = parse_list(p_data.get('Tier2'))
+                                others = [n for n in occupants if n != person]
                                 
-                                if not person_prefs.empty:
-                                    p_data = person_prefs.iloc[0]
-                                    t1 = parse_list(p_data.get('Tier1'))
-                                    t2 = parse_list(p_data.get('Tier2'))
-                                    others = [n for n in occupants if n != person]
+                                got_t1 = any(n in others for n in t1)
+                                got_t2 = any(n in others for n in t2)
+                                
+                                if len(t1) > 0 or len(t2) > 0:
+                                    if got_t1: color = "background-color: #A7D3A6; color: black;" # Green
+                                    elif got_t2: color = "background-color: #FDE49C; color: black;" # Yellow
+                                    else: color = "background-color: #FCB97D; color: black;" # Orange
                                     
-                                    got_t1 = any(n in others for n in t1)
-                                    got_t2 = any(n in others for n in t2)
-                                    
-                                    if not t1 and not t2: emoji = "😌"
-                                    elif got_t1: emoji = "🤩"
-                                    elif got_t2: emoji = "🙂"
-                                    else: emoji = "🫠"
-                                    
-                                    g_pref = str(p_data.get('GenderPref', 'none')).strip().lower()
-                                    if g_pref in ['strict', 'prefer']:
-                                        my_gender = str(p_data.get('Gender', '')).strip().lower()
-                                        for other in others:
-                                            other_prefs = df_prefs_raw[(df_prefs_raw['VersionName'] == rm_version) & (df_prefs_raw['Name'] == other)]
-                                            if not other_prefs.empty:
-                                                other_gender = str(other_prefs.iloc[0].get('Gender', '')).strip().lower()
-                                                if other_gender != my_gender and other not in t1 and other not in t2:
-                                                    emoji += " ⚠️"
-                                                    break
-
-                                st.markdown(f"- {person} {emoji}")
+                            col_text.append(person)
+                            col_style.append(color)
+                            
+                        # Add Empty Beds
+                        empty_count = rm_cap - len(occupants)
+                        for _ in range(empty_count):
+                            col_text.append("🛏️ Empty Bed")
+                            col_style.append("background-color: #f1f3f5; color: #adb5bd; font-style: italic;")
+                            
+                        # Pad the rest of the column so pandas doesn't crash
+                        while len(col_text) < max_cap:
+                            col_text.append("")
+                            col_style.append("")
+                            
+                        grid_data[rm] = col_text
+                        style_data[rm] = col_style
+                    
+                    # 3. Create DataFrame and apply styles
+                    df_grid = pd.DataFrame(grid_data)
+                    df_style = pd.DataFrame(style_data)
+                    
+                    # Apply styles safely using a lambda returning the exact shape
+                    styled_grid = df_grid.style.apply(lambda _: df_style, axis=None)
+                    
+                    # Display the super compact, color-coded table
+                    st.dataframe(styled_grid, use_container_width=True, hide_index=True)
                     st.divider()
 
-            st.divider()
+            # --- Row Data Viewer ---
             st.subheader("Raw Live Data from Google Sheets")
             col1, col2 = st.columns(2)
             col1.write("### Preferences")
@@ -122,6 +149,7 @@ if check_password():
             col2.dataframe(df_rooms_raw)
             st.divider()
 
+            # --- Copy Exporter to Chat (CONFIDENTIAL) ---
             st.subheader("Group Chat Messages")
             if df_hist_master is None or df_hist_master.empty:
                 st.info("Save an arrangement to see its group message.")
@@ -131,22 +159,21 @@ if check_password():
                     arr_acc = arr_row['Accommodation']
                     arr_ver = arr_row['Version']
                     
-                    msg_text = f"------------------------------------------\n\n"
-                    msg_text += f"**Trip Accommodation: {arr_acc}**\n\n"
+                    msg_text = f"Room Solver results for {arr_acc}\n\n"
                     
                     df_arr_full = df_hist_master[(df_hist_master['Accommodation'] == arr_acc) & (df_hist_master['Version'] == arr_ver)]
                     unique_arr_rooms = df_arr_full['RoomName'].unique()
                     
                     for rm_name in unique_arr_rooms:
                         df_rm_data = df_arr_full[df_arr_full['RoomName'] == rm_name]
-                        arr_cap = int(df_rm_data['Capacity'].iloc[0]) if not df_rm_data['Capacity'].isna().all() else "[Capacity unknown]"
+                        arr_cap = int(df_rm_data['Capacity'].iloc[0]) if not df_rm_data['Capacity'].isna().all() and df_rm_data['Capacity'].iloc[0] > 0 else "?"
                         occupants = df_rm_data['PersonName'].tolist()
                         
-                        msg_text += f"🏠 **{rm_name}**\n"
-                        msg_text += f"👥 People: {', '.join(occupants)}\n\n"
+                        emoji = random.choice(CHAT_EMOJIS)
+                        msg_text += f"{emoji} {rm_name} {len(occupants)}/{arr_cap}\n"
+                        msg_text += f"{', '.join(occupants)}\n\n"
                     
-                    msg_text += f"------------------------------------------"
-                    st.code(msg_text, language="text")
+                    st.code(msg_text.strip(), language="text")
 
         # ==========================================
         #               SOLVER TAB
@@ -176,7 +203,6 @@ if check_password():
             past_roommates = {name: set() for name in people.keys()}
             
             if not df_hist.empty:
-                # Force types for safety during lookups
                 df_hist['RoomName'] = df_hist['RoomName'].astype(str).str.strip()
                 df_hist['Accommodation'] = df_hist['Accommodation'].astype(str).str.strip()
                 
@@ -187,7 +213,7 @@ if check_password():
                         q = row.get('Quality', row.get('RoomQuality', 3)) 
                         if pd.notna(q):
                             try:
-                                q = int(float(q)) # Float conversion first catches numbers saved as '1.0'
+                                q = int(float(q)) 
                                 if q == 1: karma[p_name] += 30
                                 elif q == 2: karma[p_name] += 10
                             except: pass
@@ -339,7 +365,6 @@ if check_password():
                 st.success(f"Best fit found! (Algorithm Score: {best_global_score})")
                 
                 for rm, folks in best_global_arr.items():
-                    # Look up by forced string to match the dictionary keys
                     q = next(r['Quality'] for r in rooms if str(r['RoomName']).strip() == rm)
                     cap = next(r['Capacity'] for r in rooms if str(r['RoomName']).strip() == rm)
                     empty_beds = cap - len(folks)
@@ -411,18 +436,17 @@ if check_password():
                 st.write("### 💬 Save to Chat (CONFIDENTIAL)")
                 st.info("Clean list to paste directly into your WhatsApp/group chat.")
                 
-                msg_text = f"------------------------------------------\n\n"
-                msg_text += f"**Trip Accommodation: {location}**\n\n"
+                msg_text = f"Room Solver results for {location}\n\n"
                 
                 for rm, folks in best_global_arr.items():
                     df_rm_data = df_rooms_raw[(df_rooms_raw['Accommodation'] == location) & (df_rooms_raw['RoomName'] == rm)]
-                    arr_cap = int(df_rm_data['Capacity'].iloc[0]) if not df_rm_data.empty else "[Capacity unknown]"
+                    arr_cap = int(df_rm_data['Capacity'].iloc[0]) if not df_rm_data.empty else "?"
                     
-                    msg_text += f"🏠 **{rm}**\n"
-                    msg_text += f"👥 People: {', '.join(folks)}\n\n"
+                    emoji = random.choice(CHAT_EMOJIS)
+                    msg_text += f"{emoji} {rm} {len(folks)}/{arr_cap}\n"
+                    msg_text += f"{', '.join(folks)}\n\n"
                 
-                msg_text += f"------------------------------------------"
-                st.code(msg_text, language="text")
+                st.code(msg_text.strip(), language="text")
 
         # ==========================================
         #               HISTORY TAB
