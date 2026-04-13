@@ -365,4 +365,145 @@ if check_password():
                         move_type = random.choice([1, 2, 3]) 
                         valid_move = False
                         
-                        if move_type == 1 and new
+                        if move_type == 1 and new_arr[r1] and new_arr[r2]:
+                            p1 = random.choice(new_arr[r1])
+                            p2 = random.choice(new_arr[r2])
+                            new_arr[r1].remove(p1)
+                            new_arr[r1].append(p2)
+                            new_arr[r2].remove(p2)
+                            new_arr[r2].append(p1)
+                            valid_move = True
+                        elif move_type == 2 and new_arr[r1]:
+                            cap2 = avail[r2]
+                            if len(new_arr[r2]) < cap2:
+                                p1 = random.choice(new_arr[r1])
+                                new_arr[r1].remove(p1)
+                                new_arr[r2].append(p1)
+                                valid_move = True
+                        elif move_type == 3 and new_arr[r2]:
+                            cap1 = avail[r1]
+                            if len(new_arr[r1]) < cap1:
+                                p2 = random.choice(new_arr[r2])
+                                new_arr[r2].remove(p2)
+                                new_arr[r1].append(p2)
+                                valid_move = True
+                                
+                        if valid_move:
+                            new_score = calculate_score(new_arr)
+                            if new_score >= current_score:
+                                current_arr = new_arr
+                                current_score = new_score
+
+                    if current_score > best_global_score:
+                        best_global_score = current_score
+                        best_global_arr = current_arr
+                        
+                    progress_bar.progress((restart + 1) / 15)
+                
+                progress_bar.empty()
+
+                st.success(f"Best fit found! (Algorithm Score: {best_global_score})")
+                
+                for rm, folks in best_global_arr.items():
+                    q = next(r['Quality'] for r in rooms if r['RoomName'] == rm)
+                    cap = next(r['Capacity'] for r in rooms if r['RoomName'] == rm)
+                    empty_beds = cap - len(folks)
+                    
+                    bed_str = f"🛏️ {empty_beds} Empty Bed{'s' if empty_beds > 1 else ''}" if empty_beds > 0 else "Full"
+                    
+                    summary_parts = []
+                    for p_name in folks:
+                        p = people[p_name]
+                        others = [n for n in folks if n != p_name]
+                        t1 = parse_list(p.get('Tier1'))
+                        t2 = parse_list(p.get('Tier2'))
+                        
+                        if not t1 and not t2: emoji = "😌" 
+                        elif any(n in others for n in t1): emoji = "🤩" 
+                        elif any(n in others for n in t2): emoji = "🙂" 
+                        else: emoji = "🫠" 
+                        
+                        summary_parts.append(f"{p_name} {emoji}")
+
+                    with st.expander(f"🏠 {rm} (Quality: {q}/5) [{bed_str}] ➔ {', '.join(summary_parts)}", expanded=True):
+                        st.markdown("### Room Breakdown")
+                        for p_name in folks:
+                            p = people[p_name]
+                            others = [n for n in folks if n != p_name]
+                            t1 = parse_list(p.get('Tier1'))
+                            t2 = parse_list(p.get('Tier2'))
+                            soft_no = parse_list(p.get('SoftNo'))
+                            g_pref = str(p.get('GenderPref', 'none')).strip().lower()
+                            my_gender = str(p.get('Gender', '')).strip().lower()
+                            is_new_people = str(p.get('NewPeople', '')).strip().lower() == 'true' or p.get('NewPeople') == True
+
+                            st.markdown(f"**{p_name}**")
+                            
+                            if not t1 and not t2: st.markdown("- *😌 No specific friends requested*")
+                            if t1:
+                                t1_status = ", ".join([f"✅ {n}" if n in others else f"❌ {n}" for n in t1])
+                                st.markdown(f"- **Tier 1:** {t1_status}")
+                            if t2:
+                                t2_status = ", ".join([f"✅ {n}" if n in others else f"❌ {n}" for n in t2])
+                                st.markdown(f"- **Tier 2:** {t2_status}")
+                                
+                            # --- NEW: SOFT NO VISUAL ---
+                            if soft_no:
+                                soft_mismatches = [n for n in others if n in soft_no]
+                                if soft_mismatches:
+                                    st.markdown(f"- **Soft No:** ❌ Mixed with {', '.join(soft_mismatches)}")
+                                else:
+                                    st.markdown(f"- **Soft No:** ✅ Avoided")
+                            
+                            if g_pref in ['strict', 'prefer']:
+                                mismatches = [n for n in others if str(people[n].get('Gender', '')).strip().lower() != my_gender and n not in t1 and n not in t2]
+                                if mismatches: st.markdown(f"- **Gender ({g_pref.title()}):** ❌ Mixed with {', '.join(mismatches)}")
+                                else: st.markdown(f"- **Gender ({g_pref.title()}):** ✅ Match")
+                            
+                            if is_new_people and len(others) > 0:
+                                past_in_room = [n for n in others if n in past_roommates[p_name] and n not in t1 and n not in t2]
+                                if len(past_in_room) == len(others):
+                                    st.markdown(f"- **Variety:** ❌ 0 new faces (With {', '.join(past_in_room)})")
+                                else:
+                                    st.markdown(f"- **Variety:** ✅ Satisfied")
+                        st.divider()
+
+                # --- 1. EXPORTER FOR GOOGLE SHEETS ---
+                st.write("### 📝 Save to History (For Google Sheets)")
+                st.info("Click the 'Copy' icon top right, then paste into the first empty row of your Google Sheets 'History' tab.")
+                
+                h_rows = []
+                for rm, folks in best_global_arr.items():
+                    q = next(r['Quality'] for r in rooms if r['RoomName'] == rm)
+                    for p in folks: h_rows.append({"Accommodation": location, "PersonName": p, "RoomName": rm, "Quality": q, "Version": version})
+                
+                df_export = pd.DataFrame(h_rows)
+                tsv_text = df_export.to_csv(sep='\t', index=False, header=False)
+                st.code(tsv_text, language="text")
+
+                # --- 2. EXPORTER FOR GROUP CHAT ---
+                st.write("### 💬 Save to Chat (CONFIDENTIAL)")
+                st.info("Clean list to paste directly into your WhatsApp/group chat.")
+                
+                msg_text = f"Room Solver results for {location}\n\n"
+                
+                for rm, folks in best_global_arr.items():
+                    arr_cap = next(r['Capacity'] for r in rooms if r['RoomName'] == rm)
+                    emoji = random.choice(CHAT_EMOJIS)
+                    msg_text += f"{emoji} {rm} {len(folks)}/{arr_cap}\n"
+                    msg_text += f"{', '.join(folks)}\n\n"
+                
+                st.code(msg_text.strip(), language="text")
+
+        # ==========================================
+        #               HISTORY TAB
+        # ==========================================
+        with tab_history:
+            st.subheader("Fairness Ledger")
+            st.write("Current Accumulated Karma (Higher = Gets priority for better rooms)")
+            st.bar_chart(pd.Series(karma))
+            st.write("**Past Roommates (Rotating targets):**")
+            st.json({k: list(v) for k, v in past_roommates.items() if v})
+
+    except Exception as e:
+        st.error(f"Something is wrong in your Google Sheet format. Error: {e}")
